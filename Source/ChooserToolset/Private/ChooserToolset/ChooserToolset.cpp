@@ -1108,9 +1108,39 @@ namespace
 		return FString::Join(Parts, TEXT(", "));
 	}
 
-	// 对一个 Output 列元素（FInstancedStruct 包装或普通 struct/标量）生成精简快照，OutLabel 返回结构短名。
-	FString SummarizeOutputElement(const FProperty* Inner, const void* ElemMem, const void* DefElemMem, FString& OutLabel)
+	// 枚举输出行数据(FChooserOutputEnumRowData)：取可读 ValueName(优先)或退回数值 Value。非该类型返回 false。
+	// 枚举的 ValueName 已等价于 Value，逐字段导出会得到冗余的 "Value=N, ValueName=X"；这里只取一项语义值。
+	bool TrySummarizeEnumOutput(const UScriptStruct* StructType, const void* Mem, FString& OutText)
 	{
+		if (!StructType || !Mem || StructType->GetFName() != TEXT("ChooserOutputEnumRowData"))
+		{
+			return false;
+		}
+		if (const FNameProperty* ValueNameProp = FindFProperty<FNameProperty>(StructType, TEXT("ValueName")))
+		{
+			const FString ValueNameStr = ValueNameProp->GetPropertyValue_InContainer(Mem).ToString();
+			if (!ValueNameStr.IsEmpty() && ValueNameStr != TEXT("None"))
+			{
+				OutText = ValueNameStr;
+				return true;
+			}
+		}
+		if (const FProperty* ValueProp = StructType->FindPropertyByName(TEXT("Value")))
+		{
+			FString ValueText;
+			ValueProp->ExportTextItem_Direct(ValueText, ValueProp->ContainerPtrToValuePtr<void>(Mem), nullptr, nullptr, PPF_None);
+			OutText = FString::Printf(TEXT("枚举值 %s"), *ValueText);
+			return true;
+		}
+		OutText.Reset();
+		return true;
+	}
+
+	// 对一个 Output 列元素（FInstancedStruct 包装或普通 struct/标量）生成精简快照，OutLabel 返回结构短名。
+	// bOutBare=true 表示返回值已是完整可读串（如枚举名），调用方应原样输出、不要再套 Label{...} 壳。
+	FString SummarizeOutputElement(const FProperty* Inner, const void* ElemMem, const void* DefElemMem, FString& OutLabel, bool& bOutBare)
+	{
+		bOutBare = false;
 		if (const FStructProperty* StructProp = CastField<FStructProperty>(Inner))
 		{
 			if (StructProp->Struct == FInstancedStruct::StaticStruct())
@@ -1122,9 +1152,21 @@ namespace
 				{
 					return FString();
 				}
+				FString EnumText;
+				if (TrySummarizeEnumOutput(InnerType, Value->GetMemory(), EnumText))
+				{
+					bOutBare = true;
+					return EnumText;
+				}
 				OutLabel = InnerType->GetName();
 				const void* DefInner = (Default && Default->GetScriptStruct() == InnerType) ? Default->GetMemory() : nullptr;
 				return SummarizeStructNonDefault(InnerType, Value->GetMemory(), DefInner);
+			}
+			FString EnumText;
+			if (TrySummarizeEnumOutput(StructProp->Struct, ElemMem, EnumText))
+			{
+				bOutBare = true;
+				return EnumText;
 			}
 			OutLabel = StructProp->Struct->GetName();
 			return SummarizeStructNonDefault(StructProp->Struct, ElemMem, DefElemMem);
@@ -1171,12 +1213,21 @@ namespace
 				DefElemMem = DefProp->ContainerPtrToValuePtr<void>(ColumnStruct.GetMemory());
 			}
 			FString Label;
-			const FString Summary = SummarizeOutputElement(ArrayProp->Inner, Helper.GetRawPtr(RowIndex), DefElemMem, Label);
+			bool bBare = false;
+			const FString Summary = SummarizeOutputElement(ArrayProp->Inner, Helper.GetRawPtr(RowIndex), DefElemMem, Label, bBare);
+			if (bBare)
+			{
+				if (!Summary.IsEmpty())
+				{
+					ColumnParts.Add(Summary);
+				}
+				continue;
+			}
 			if (Label.IsEmpty())
 			{
 				Label = ColumnInfo.Binding.DisplayName.IsEmpty() ? StructShortTypeName(ColumnInfo.Type) : ColumnInfo.Binding.DisplayName;
 			}
-			ColumnParts.Add(Summary.IsEmpty() ? FString::Printf(TEXT("%s{默认}"), *Label) : FString::Printf(TEXT("%s{%s}"), *Label, *Summary));
+			ColumnParts.Add(Summary.IsEmpty() ? FString::Printf(TEXT("%s(全默认)"), *Label) : FString::Printf(TEXT("%s{%s}"), *Label, *Summary));
 		}
 		return FString::Join(ColumnParts, TEXT("; "));
 	}
