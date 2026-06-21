@@ -1,0 +1,23 @@
+# Unreal generated artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+
+# IDE / OS noise
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+*.bak
