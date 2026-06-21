@@ -532,17 +532,15 @@ namespace
 		return Info;
 	}
 
-	// @KUROGAMES BEGIN 行筛选条件可读化：把单个 cell 的列类型/绑定名/取值 JSON 翻译成人类可读的筛选条件
 	struct FCellConditionResult
 	{
-		FString Text;                 // 可读条件文本；非筛选列为空字符串
-		bool bIsFilterColumn = false; // 是否为筛选列（OutputStructColumn 等输出列为 false）
-		bool bConstrains = false;     // 是否构成实际约束（"任意"/无界区间为 false，不计入行汇总）
+		FString Text;
+		bool bIsFilter = false;
+		bool bConstrains = false;
 	};
 
 	FString StripEnumValueName(const FString& ValueName)
 	{
-		// 去掉 "EType::" 前缀，只保留枚举项短名，如 "ESpecialState::None" -> "None"
 		int32 SeparatorIndex = INDEX_NONE;
 		if (ValueName.FindLastChar(TEXT(':'), SeparatorIndex))
 		{
@@ -551,17 +549,190 @@ namespace
 		return ValueName;
 	}
 
-	FCellConditionResult BuildCellCondition(const FString& ColumnType, const FString& BindingDisplayName, const FString& ValueJson)
+	FString CompactName(FString Value)
+	{
+		Value.TrimStartAndEndInline();
+		if (Value.StartsWith(TEXT("\"")) && Value.EndsWith(TEXT("\"")) && Value.Len() >= 2)
+		{
+			Value = Value.Mid(1, Value.Len() - 2);
+		}
+
+		int32 QuoteIndex = INDEX_NONE;
+		if (Value.FindLastChar(TEXT('\''), QuoteIndex) && QuoteIndex > 0)
+		{
+			FString Inner = Value.Left(QuoteIndex);
+			int32 OpenQuoteIndex = INDEX_NONE;
+			if (Inner.FindLastChar(TEXT('\''), OpenQuoteIndex))
+			{
+				Value = Inner.RightChop(OpenQuoteIndex + 1);
+			}
+		}
+
+		int32 SeparatorIndex = INDEX_NONE;
+		if (Value.FindLastChar(TEXT('.'), SeparatorIndex) || Value.FindLastChar(TEXT('/'), SeparatorIndex))
+		{
+			return Value.RightChop(SeparatorIndex + 1);
+		}
+		return Value;
+	}
+
+	bool ReadColumnBool(const FInstancedStruct& ColumnStruct, FName PropertyName, bool DefaultValue)
+	{
+		const UScriptStruct* ScriptStruct = ColumnStruct.GetScriptStruct();
+		if (!ScriptStruct || !ColumnStruct.GetMemory())
+		{
+			return DefaultValue;
+		}
+
+		if (const FBoolProperty* BoolProperty = FindFProperty<FBoolProperty>(ScriptStruct, PropertyName))
+		{
+			return BoolProperty->GetPropertyValue_InContainer(ColumnStruct.GetMemory());
+		}
+		return DefaultValue;
+	}
+
+	bool TryGetBoolFieldAnyCase(const TSharedPtr<FJsonObject>& ValueObject, const FString& FieldName, bool& OutValue)
+	{
+		if (!ValueObject.IsValid())
+		{
+			return false;
+		}
+
+		if (ValueObject->TryGetBoolField(FieldName, OutValue))
+		{
+			return true;
+		}
+
+		FString StandardizedFieldName = FieldName;
+		if (StandardizedFieldName.StartsWith(TEXT("b")) && StandardizedFieldName.Len() > 1 && FChar::IsUpper(StandardizedFieldName[1]))
+		{
+			StandardizedFieldName = StandardizedFieldName.RightChop(1);
+		}
+		if (!StandardizedFieldName.IsEmpty())
+		{
+			StandardizedFieldName[0] = FChar::ToLower(StandardizedFieldName[0]);
+		}
+		return ValueObject->TryGetBoolField(StandardizedFieldName, OutValue);
+	}
+
+	FString JsonFieldToString(const TSharedPtr<FJsonObject>& ValueObject, const FString& FieldName)
+	{
+		if (!ValueObject.IsValid() || !ValueObject->HasField(FieldName))
+		{
+			return FString();
+		}
+
+		const TSharedPtr<FJsonValue> Value = ValueObject->TryGetField(FieldName);
+		if (!Value.IsValid() || Value->IsNull())
+		{
+			return FString();
+		}
+
+		FString StringValue;
+		if (Value->TryGetString(StringValue))
+		{
+			return StringValue;
+		}
+
+		double NumberValue = 0.0;
+		if (Value->TryGetNumber(NumberValue))
+		{
+			return FString::SanitizeFloat(NumberValue);
+		}
+		return FString();
+	}
+
+	void CollectGameplayTagNames(const TArray<TSharedPtr<FJsonValue>>& TagValues, TArray<FString>& OutTagNames)
+	{
+		for (const TSharedPtr<FJsonValue>& TagValue : TagValues)
+		{
+			const TSharedPtr<FJsonObject> TagObject = TagValue.IsValid() ? TagValue->AsObject() : nullptr;
+			if (!TagObject.IsValid())
+			{
+				continue;
+			}
+
+			FString TagName;
+			if (TagObject->TryGetStringField(TEXT("tagName"), TagName) && !TagName.IsEmpty())
+			{
+				OutTagNames.Add(TagName);
+			}
+		}
+	}
+
+	FString DescribeGameplayTagQuery(const TSharedPtr<FJsonObject>& ValueObject)
+	{
+		if (!ValueObject.IsValid())
+		{
+			return FString();
+		}
+
+		FString Description;
+		if (ValueObject->TryGetStringField(TEXT("userDescription"), Description) && !Description.IsEmpty())
+		{
+			return Description;
+		}
+		if (ValueObject->TryGetStringField(TEXT("autoDescription"), Description) && !Description.IsEmpty())
+		{
+			return Description;
+		}
+		if (ValueObject->TryGetStringField(TEXT("AutoDescription"), Description) && !Description.IsEmpty())
+		{
+			return Description;
+		}
+		return FString();
+	}
+
+	FCellConditionResult BuildCellCondition(
+		const FString& ColumnType,
+		const FString& BindingDisplayName,
+		const FString& ValueJson,
+		const FInstancedStruct& ColumnStruct)
 	{
 		FCellConditionResult Result;
 		const FString Label = BindingDisplayName.IsEmpty() ? TEXT("?") : BindingDisplayName;
-
-		if (ColumnType.EndsWith(TEXT("EnumColumn")))
+		const FChooserColumnBase* Column = ColumnStruct.GetPtr<FChooserColumnBase>();
+		if (!Column || !Column->HasFilters() || Column->IsRandomizeColumn())
 		{
-			Result.bIsFilterColumn = true;
+			return Result;
+		}
+#if WITH_EDITORONLY_DATA
+		if (Column->bDisabled)
+		{
+			return Result;
+		}
+#endif
+		Result.bIsFilter = true;
+
+		if (ColumnType.EndsWith(TEXT("MultiEnumColumn")))
+		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
 			{
+				return Result;
+			}
+
+			double RawValue = 0.0;
+			ValueObject->TryGetNumberField(TEXT("value"), RawValue);
+			if (static_cast<uint32>(RawValue) == 0)
+			{
+				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s 命中枚举位 %u"), *Label, static_cast<uint32>(RawValue));
+				Result.bConstrains = true;
+			}
+			return Result;
+		}
+
+		if (ColumnType.EndsWith(TEXT("EnumColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			if (!ValueObject.IsValid())
+			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
 				return Result;
 			}
 
@@ -574,7 +745,6 @@ namespace
 			}
 			else
 			{
-				// 非编辑器数据可能没有 valueName，回退到原始枚举数值
 				double RawValue = 0.0;
 				ValueObject->TryGetNumberField(TEXT("value"), RawValue);
 				ValueName = FString::FromInt(static_cast<int32>(RawValue));
@@ -592,7 +762,6 @@ namespace
 			}
 			else
 			{
-				// MatchAny 或其它：不构成约束
 				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
 			}
 			return Result;
@@ -600,7 +769,6 @@ namespace
 
 		if (ColumnType.EndsWith(TEXT("BoolColumn")))
 		{
-			Result.bIsFilterColumn = true;
 			FString Comparison;
 			if (const TSharedPtr<FJsonValue> ValueNode = ParseJsonValue(ValueJson))
 			{
@@ -619,7 +787,6 @@ namespace
 			}
 			else
 			{
-				// MatchAny 或其它：不构成约束
 				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
 			}
 			return Result;
@@ -627,23 +794,24 @@ namespace
 
 		if (ColumnType.EndsWith(TEXT("FloatRangeColumn")))
 		{
-			Result.bIsFilterColumn = true;
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
 			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
 				return Result;
 			}
 
 			bool bNoMin = false;
 			bool bNoMax = false;
-			ValueObject->TryGetBoolField(TEXT("bNoMin"), bNoMin);
-			ValueObject->TryGetBoolField(TEXT("bNoMax"), bNoMax);
+			TryGetBoolFieldAnyCase(ValueObject, TEXT("bNoMin"), bNoMin);
+			TryGetBoolFieldAnyCase(ValueObject, TEXT("bNoMax"), bNoMax);
 			double MinValue = 0.0;
 			double MaxValue = 0.0;
 			ValueObject->TryGetNumberField(TEXT("min"), MinValue);
 			ValueObject->TryGetNumberField(TEXT("max"), MaxValue);
-			const FString MinText = FString::SanitizeFloat(MinValue, 0);
-			const FString MaxText = FString::SanitizeFloat(MaxValue, 0);
+			const FString MinText = FString::SanitizeFloat(MinValue);
+			const FString MaxText = FString::SanitizeFloat(MaxValue);
 
 			if (bNoMin && bNoMax)
 			{
@@ -667,10 +835,149 @@ namespace
 			return Result;
 		}
 
-		// 输出列（OutputStructColumn）及其它非筛选列：不产出筛选条件
+		if (ColumnType.EndsWith(TEXT("FloatDistanceColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			if (!ValueObject.IsValid())
+			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
+				return Result;
+			}
+
+			double Value = 0.0;
+			ValueObject->TryGetNumberField(TEXT("value"), Value);
+			Result.Text = FString::Printf(TEXT("%s ≈ %s（按距离评分）"), *Label, *FString::SanitizeFloat(Value));
+			Result.bConstrains = true;
+			return Result;
+		}
+
+		if (ColumnType.EndsWith(TEXT("GameplayTagQueryColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			const FString Description = DescribeGameplayTagQuery(ValueObject);
+			Result.Text = Description.IsEmpty()
+				? FString::Printf(TEXT("%s 满足标签查询"), *Label)
+				: FString::Printf(TEXT("%s 满足标签查询（%s）"), *Label, *Description);
+			Result.bConstrains = true;
+			return Result;
+		}
+
+		if (ColumnType.EndsWith(TEXT("GameplayTagColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			if (!ValueObject.IsValid())
+			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
+				return Result;
+			}
+
+			TArray<FString> TagNames;
+			const TArray<TSharedPtr<FJsonValue>>* GameplayTags = nullptr;
+			if (ValueObject->TryGetArrayField(TEXT("gameplayTags"), GameplayTags))
+			{
+				CollectGameplayTagNames(*GameplayTags, TagNames);
+			}
+			if (TagNames.IsEmpty())
+			{
+				const TArray<TSharedPtr<FJsonValue>>* ParentTags = nullptr;
+				if (ValueObject->TryGetArrayField(TEXT("parentTags"), ParentTags))
+				{
+					CollectGameplayTagNames(*ParentTags, TagNames);
+				}
+			}
+
+			const bool bInvert = ReadColumnBool(ColumnStruct, TEXT("bInvertMatchingLogic"), false);
+			if (TagNames.IsEmpty())
+			{
+				Result.Text = bInvert
+					? FString::Printf(TEXT("%s 不匹配空标签集"), *Label)
+					: FString::Printf(TEXT("%s: 任意"), *Label);
+				Result.bConstrains = bInvert;
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s %s标签[%s]"), *Label, bInvert ? TEXT("不匹配") : TEXT("匹配"), *FString::Join(TagNames, TEXT(", ")));
+				Result.bConstrains = true;
+			}
+			return Result;
+		}
+
+		if (ColumnType.EndsWith(TEXT("ObjectClassColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			if (!ValueObject.IsValid())
+			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
+				return Result;
+			}
+
+			FString Comparison;
+			ValueObject->TryGetStringField(TEXT("comparison"), Comparison);
+			const FString ValueName = CompactName(JsonFieldToString(ValueObject, TEXT("value")));
+			if (Comparison == TEXT("Any"))
+			{
+				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
+			}
+			else if (Comparison == TEXT("Equal"))
+			{
+				Result.Text = FString::Printf(TEXT("%s 类 == %s"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			else if (Comparison == TEXT("NotEqual"))
+			{
+				Result.Text = FString::Printf(TEXT("%s 类 != %s"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			else if (Comparison == TEXT("NotSubClassOf"))
+			{
+				Result.Text = FString::Printf(TEXT("%s 不是 %s 的子类"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s 是 %s 的子类"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			return Result;
+		}
+
+		if (ColumnType.EndsWith(TEXT("ObjectColumn")))
+		{
+			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
+			if (!ValueObject.IsValid())
+			{
+				Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+				Result.bConstrains = true;
+				return Result;
+			}
+
+			FString Comparison;
+			ValueObject->TryGetStringField(TEXT("comparison"), Comparison);
+			const FString ValueName = CompactName(JsonFieldToString(ValueObject, TEXT("value")));
+			if (Comparison == TEXT("MatchEqual"))
+			{
+				Result.Text = FString::Printf(TEXT("%s == %s"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			else if (Comparison == TEXT("MatchNotEqual"))
+			{
+				Result.Text = FString::Printf(TEXT("%s != %s"), *Label, *ValueName);
+				Result.bConstrains = true;
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
+			}
+			return Result;
+		}
+
+		Result.Text = FString::Printf(TEXT("%s（未翻译筛选: %s）"), *Label, *ValueJson);
+		Result.bConstrains = true;
 		return Result;
 	}
-	// @KUROGAMES END
 
 	FChooserToolsetRowInfo DescribeRow(const UChooserTable* Chooser, int32 RowIndex, const TArray<FChooserToolsetColumnInfo>& Columns)
 	{
@@ -683,10 +990,23 @@ namespace
 		TArray<FString> ConstraintTexts;
 		for (const FChooserToolsetColumnInfo& Column : Columns)
 		{
+			if (!Chooser->ColumnsStructs.IsValidIndex(Column.Index))
+			{
+				continue;
+			}
+
 			const FString CellValueJson = Column.RowValuesJson.IsValidIndex(RowIndex)
 				? Column.RowValuesJson[RowIndex]
 				: FString();
-			const FCellConditionResult CellCondition = BuildCellCondition(Column.Type, Column.Binding.DisplayName, CellValueJson);
+			const FCellConditionResult CellCondition = BuildCellCondition(
+				Column.Type,
+				Column.Binding.DisplayName,
+				CellValueJson,
+				Chooser->ColumnsStructs[Column.Index]);
+			if (!CellCondition.bIsFilter)
+			{
+				continue;
+			}
 			if (CellCondition.bConstrains)
 			{
 				ConstraintTexts.Add(CellCondition.Text);

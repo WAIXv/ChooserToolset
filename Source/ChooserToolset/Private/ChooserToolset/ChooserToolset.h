@@ -131,10 +131,8 @@ struct FChooserToolsetRowInfo
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	FString NestedChooserPath;
 
-	// @KUROGAMES BEGIN 行筛选条件可读化：本行所有有效筛选条件用 " 且 " 连接而成的一句话，便于一眼读懂
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	FString ConditionSummary;
-	// @KUROGAMES END
 };
 
 /// Complete description of a Chooser table or nested chooser.
