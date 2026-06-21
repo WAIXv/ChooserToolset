@@ -1084,6 +1084,103 @@ namespace
 		return Result;
 	}
 
+	// 导出 struct 内非默认字段（逐字段与 DefMem 比较），形如 "A=x, B=y"。DefMem 为空则全部导出。
+	FString SummarizeStructNonDefault(const UScriptStruct* StructType, const void* Mem, const void* DefMem)
+	{
+		if (!StructType || !Mem)
+		{
+			return FString();
+		}
+		TArray<FString> Parts;
+		for (TFieldIterator<FProperty> It(StructType); It; ++It)
+		{
+			FProperty* Property = *It;
+			const void* ValuePtr = Property->ContainerPtrToValuePtr<void>(Mem);
+			const void* DefPtr = DefMem ? Property->ContainerPtrToValuePtr<void>(DefMem) : nullptr;
+			if (DefPtr && Property->Identical(ValuePtr, DefPtr))
+			{
+				continue;
+			}
+			FString ValueText;
+			Property->ExportTextItem_Direct(ValueText, ValuePtr, DefPtr, nullptr, PPF_None);
+			Parts.Add(FString::Printf(TEXT("%s=%s"), *Property->GetName(), *ValueText));
+		}
+		return FString::Join(Parts, TEXT(", "));
+	}
+
+	// 对一个 Output 列元素（FInstancedStruct 包装或普通 struct/标量）生成精简快照，OutLabel 返回结构短名。
+	FString SummarizeOutputElement(const FProperty* Inner, const void* ElemMem, const void* DefElemMem, FString& OutLabel)
+	{
+		if (const FStructProperty* StructProp = CastField<FStructProperty>(Inner))
+		{
+			if (StructProp->Struct == FInstancedStruct::StaticStruct())
+			{
+				const FInstancedStruct* Value = reinterpret_cast<const FInstancedStruct*>(ElemMem);
+				const FInstancedStruct* Default = reinterpret_cast<const FInstancedStruct*>(DefElemMem);
+				const UScriptStruct* InnerType = Value ? Value->GetScriptStruct() : nullptr;
+				if (!InnerType)
+				{
+					return FString();
+				}
+				OutLabel = InnerType->GetName();
+				const void* DefInner = (Default && Default->GetScriptStruct() == InnerType) ? Default->GetMemory() : nullptr;
+				return SummarizeStructNonDefault(InnerType, Value->GetMemory(), DefInner);
+			}
+			OutLabel = StructProp->Struct->GetName();
+			return SummarizeStructNonDefault(StructProp->Struct, ElemMem, DefElemMem);
+		}
+		if (Inner && ElemMem)
+		{
+			FString ValueText;
+			Inner->ExportTextItem_Direct(ValueText, ElemMem, DefElemMem, nullptr, PPF_None);
+			return ValueText;
+		}
+		return FString();
+	}
+
+	// 聚合一行所有 Output 列的精简快照（已扣除各列 DefaultRowValue）。无输出列返回空。
+	FString SummarizeRowOutputs(const UChooserTable* Chooser, int32 RowIndex, const TArray<FChooserToolsetColumnInfo>& Columns)
+	{
+		TArray<FString> ColumnParts;
+		for (const FChooserToolsetColumnInfo& ColumnInfo : Columns)
+		{
+			if (!StructShortTypeName(ColumnInfo.Type).StartsWith(TEXT("Output")) || !Chooser->ColumnsStructs.IsValidIndex(ColumnInfo.Index))
+			{
+				continue;
+			}
+			const FInstancedStruct& ColumnStruct = Chooser->ColumnsStructs[ColumnInfo.Index];
+			const UScriptStruct* ColScriptStruct = ColumnStruct.GetScriptStruct();
+			FChooserColumnBase* Column = const_cast<FInstancedStruct&>(ColumnStruct).GetMutablePtr<FChooserColumnBase>();
+			if (!ColScriptStruct || !Column)
+			{
+				continue;
+			}
+			FArrayProperty* ArrayProp = CastField<FArrayProperty>(ColScriptStruct->FindPropertyByName(Column->RowValuesPropertyName()));
+			if (!ArrayProp)
+			{
+				continue;
+			}
+			FScriptArrayHelper Helper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(ColumnStruct.GetMemory()));
+			if (!Helper.IsValidIndex(RowIndex))
+			{
+				continue;
+			}
+			const void* DefElemMem = nullptr;
+			if (FProperty* DefProp = ColScriptStruct->FindPropertyByName(TEXT("DefaultRowValue")))
+			{
+				DefElemMem = DefProp->ContainerPtrToValuePtr<void>(ColumnStruct.GetMemory());
+			}
+			FString Label;
+			const FString Summary = SummarizeOutputElement(ArrayProp->Inner, Helper.GetRawPtr(RowIndex), DefElemMem, Label);
+			if (Label.IsEmpty())
+			{
+				Label = ColumnInfo.Binding.DisplayName.IsEmpty() ? StructShortTypeName(ColumnInfo.Type) : ColumnInfo.Binding.DisplayName;
+			}
+			ColumnParts.Add(Summary.IsEmpty() ? FString::Printf(TEXT("%s{默认}"), *Label) : FString::Printf(TEXT("%s{%s}"), *Label, *Summary));
+		}
+		return FString::Join(ColumnParts, TEXT("; "));
+	}
+
 	FChooserToolsetRowInfo DescribeRow(const UChooserTable* Chooser, int32 RowIndex, const TArray<FChooserToolsetColumnInfo>& Columns)
 	{
 		FChooserToolsetRowInfo Info;
@@ -1118,6 +1215,7 @@ namespace
 			}
 		}
 		Info.ConditionTerms = ConstraintTexts;
+		Info.OutputSummary = SummarizeRowOutputs(Chooser, RowIndex, Columns);
 		Info.ConditionSummary = ConstraintTexts.Num() > 0
 			? FString::Join(ConstraintTexts, TEXT(" 且 "))
 			: TEXT("（无筛选条件，命中任意输入）");
@@ -1609,6 +1707,8 @@ FChooserToolsetNestedChooserOutline UChooserToolset::DescribeNestedChooserOutlin
 		const TArray<FString>& InheritedTerms = NodePathTerms[Node.Index];
 		OutlineNode.InheritedCondition = InheritedTerms.Num() > 0 ? FString::Join(InheritedTerms, TEXT(" 且 ")) : FString();
 
+		// 按 OutputSummary 去重，把输出取值相同的行归入同一输出组（仅统计启用行）。
+		TMap<FString, int32> OutputGroupIndex;
 		for (const FChooserToolsetRowInfo& Row : Node.Description.Rows)
 		{
 			FChooserToolsetOutlineRow& OutlineRow = OutlineNode.Rows.AddDefaulted_GetRef();
@@ -1645,6 +1745,25 @@ FChooserToolsetNestedChooserOutline UChooserToolset::DescribeNestedChooserOutlin
 			else
 			{
 				OutlineRow.TargetKind = TEXT("None");
+			}
+
+			if (!Row.bDisabled && !Row.OutputSummary.IsEmpty())
+			{
+				int32 GroupIdx;
+				if (const int32* Found = OutputGroupIndex.Find(Row.OutputSummary))
+				{
+					GroupIdx = *Found;
+				}
+				else
+				{
+					GroupIdx = OutlineNode.OutputGroups.Num();
+					OutputGroupIndex.Add(Row.OutputSummary, GroupIdx);
+					FChooserToolsetOutputGroup& NewGroup = OutlineNode.OutputGroups.AddDefaulted_GetRef();
+					NewGroup.Index = GroupIdx;
+					NewGroup.Output = Row.OutputSummary;
+				}
+				OutlineRow.OutputGroup = GroupIdx;
+				OutlineNode.OutputGroups[GroupIdx].Rows.Add(Row.Index);
 			}
 		}
 	}

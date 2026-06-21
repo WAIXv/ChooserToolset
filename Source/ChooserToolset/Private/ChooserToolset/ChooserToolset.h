@@ -137,6 +137,11 @@ struct FChooserToolsetRowInfo
 	/// 本行各筛选列翻译出的单项约束（未 join）。供上层区分"全表恒定前置"与"行级判别项"。
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	TArray<FString> ConditionTerms;
+
+	/// 本行选中后各 Output 列写回 context 的精简快照（已逐字段扣除列 DefaultRowValue，只留非默认字段）。
+	/// 无输出列时为空。供 outline 按值去重分组。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString OutputSummary;
 };
 
 /// Complete description of a Chooser table or nested chooser.
@@ -261,6 +266,28 @@ struct FChooserToolsetOutlineRow
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	int32 TargetNodeIndex = INDEX_NONE;
+
+	/// 本行输出所属的输出组序号（见 node 的 OutputGroups）；无输出列时为 -1。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 OutputGroup = INDEX_NONE;
+};
+
+/// 一组取值相同的行输出（按 OutputSummary 去重）。
+USTRUCT(BlueprintType)
+struct FChooserToolsetOutputGroup
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 Index = INDEX_NONE;
+
+	/// 该组的精简输出快照（已扣除列 DefaultRowValue）。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString Output;
+
+	/// 使用该输出的行号。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<int32> Rows;
 };
 
 /// 面向 LLM 的最小 NestedChooser 节点。
@@ -300,6 +327,10 @@ struct FChooserToolsetOutlineNode
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	TArray<FChooserToolsetOutlineRow> Rows;
+
+	/// 本表按值去重后的输出组；行通过 OutputGroup 序号引用。整表无输出列时为空。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<FChooserToolsetOutputGroup> OutputGroups;
 };
 
 /// 面向 Agent/LLM 的精简 NestedChooser 层级概要。

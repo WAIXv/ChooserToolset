@@ -138,7 +138,9 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 
 ## LLM 层级概要
 
-`DescribeNestedChooserOutline` 返回 `FChooserToolsetNestedChooserOutline`，是最终交给 Agent/LLM 的推荐入口。它复用 `DescribeNestedChoosers` 的 C++ 解析结果，只保留层级、每行条件和输出目标，避免把原始 column/cell/result JSON 暴露给 LLM。
+`DescribeNestedChooserOutline` 返回 `FChooserToolsetNestedChooserOutline`，是最终交给 Agent/LLM 的推荐入口。它复用 `DescribeNestedChoosers` 的 C++ 解析结果，只保留层级、每行条件和输出目标，避免把原始 column/cell/result JSON 暴露给 LLM。它还会把祖先链已保证的条件上提为 node 级 `inheritedCondition`，使行级 `condition` 只展示本层新增约束。
+
+> 要正确解读这些条件——哪种 column 参与筛选、哪种只写输出、`MatchAny`/空值是放宽还是收紧、行如何按顺序首匹配胜出、fallback 何时生效——见 [`EngineChooserSemantics.md`](EngineChooserSemantics.md)。这份引擎语义说明也适合直接喂给做 Chooser 分析的子 Agent。
 
 顶层字段：
 
@@ -161,6 +163,7 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 | `chooserPath` | 当前 chooser 的完整路径。 |
 | `cycle` | 是否检测到递归环。 |
 | `childIndices[]` | 子 node 下标。 |
+| `inheritedCondition` | 沿祖先链（各级 `sourceRowIndex` 父行条件累加）已经保证的前提条件，本 node 求值时必然成立；已从各行 `condition` 中扣除，避免重复展示"子表复查上游已筛条件"这类 Chooser 配置自身的冗余。 |
 | `rows[]` | 当前 chooser 的行条件和目标。 |
 
 每个 row 包含：
@@ -169,7 +172,7 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 |---|---|
 | `index` | 行号，保留 Chooser 选择顺序。 |
 | `disabled` | 行是否禁用。 |
-| `condition` | C++ 已翻译的行筛选条件；无筛选条件压缩为 `任意`。 |
+| `condition` | C++ 已翻译的行筛选条件，并已扣除本 node 的 `inheritedCondition`，只保留**本层新增**约束；无新增约束时压缩为 `任意`。某行实际生效条件 = node 的 `inheritedCondition` + 该行 `condition`。 |
 | `targetKind` | `NestedChooser`、`Object` 或 `None`。 |
 | `target` | 压缩后的目标名。 |
 | `targetNodeIndex` | `targetKind=NestedChooser` 时对应的 node 下标，否则为 `-1`。 |
