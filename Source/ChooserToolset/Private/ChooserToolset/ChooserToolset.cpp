@@ -64,11 +64,21 @@ namespace
 	{
 		TSharedPtr<FJsonValue> Value;
 		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
-		if (!FJsonSerializer::Deserialize(Reader, Value) || !Value.IsValid())
+		if (FJsonSerializer::Deserialize(Reader, Value) && Value.IsValid())
 		{
-			return nullptr;
+			return Value;
 		}
-		return Value;
+
+		// UE 的 JSON 反序列化器无法解析顶层裸标量（如 "MatchFalse"、3.5、true）：
+		// 标量值只有处于 object/array 作用域内才会被写入 StackState，否则解析直接失败。
+		// 包成单元素数组再取出，确保 BoolColumn 等单标量 cell 能被正确读取。
+		TArray<TSharedPtr<FJsonValue>> WrappedArray;
+		const TSharedRef<TJsonReader<>> WrappedReader = TJsonReaderFactory<>::Create(FString::Printf(TEXT("[%s]"), *Json));
+		if (FJsonSerializer::Deserialize(WrappedReader, WrappedArray) && WrappedArray.Num() == 1 && WrappedArray[0].IsValid())
+		{
+			return WrappedArray[0];
+		}
+		return nullptr;
 	}
 
 	TSharedPtr<FJsonObject> ParseJsonObject(const FString& Json)
@@ -601,13 +611,19 @@ namespace
 		return ChooserPath;
 	}
 
-	FString CompactConditionSummary(const FString& ConditionSummary)
+	FString StructShortTypeName(const FString& TypeName)
 	{
-		if (ConditionSummary == TEXT("（无筛选条件，命中任意输入）"))
+		int32 SeparatorIndex = INDEX_NONE;
+		if (TypeName.FindLastChar(TEXT('.'), SeparatorIndex) || TypeName.FindLastChar(TEXT('/'), SeparatorIndex))
 		{
-			return TEXT("任意");
+			return TypeName.RightChop(SeparatorIndex + 1);
 		}
-		return ConditionSummary;
+		return TypeName;
+	}
+
+	bool IsColumnType(const FString& ColumnType, const TCHAR* ShortTypeName)
+	{
+		return StructShortTypeName(ColumnType) == ShortTypeName;
 	}
 
 	bool ReadColumnBool(const FInstancedStruct& ColumnStruct, FName PropertyName, bool DefaultValue)
@@ -621,6 +637,26 @@ namespace
 		if (const FBoolProperty* BoolProperty = FindFProperty<FBoolProperty>(ScriptStruct, PropertyName))
 		{
 			return BoolProperty->GetPropertyValue_InContainer(ColumnStruct.GetMemory());
+		}
+		return DefaultValue;
+	}
+
+	double ReadColumnDouble(const FInstancedStruct& ColumnStruct, FName PropertyName, double DefaultValue)
+	{
+		const UScriptStruct* ScriptStruct = ColumnStruct.GetScriptStruct();
+		if (!ScriptStruct || !ColumnStruct.GetMemory())
+		{
+			return DefaultValue;
+		}
+
+		if (const FNumericProperty* NumericProperty = FindFProperty<FNumericProperty>(ScriptStruct, PropertyName))
+		{
+			const void* ValuePtr = NumericProperty->ContainerPtrToValuePtr<void>(ColumnStruct.GetMemory());
+			if (NumericProperty->IsFloatingPoint())
+			{
+				return NumericProperty->GetFloatingPointPropertyValue(ValuePtr);
+			}
+			return static_cast<double>(NumericProperty->GetSignedIntPropertyValue(ValuePtr));
 		}
 		return DefaultValue;
 	}
@@ -738,7 +774,7 @@ namespace
 #endif
 		Result.bIsFilter = true;
 
-		if (ColumnType.EndsWith(TEXT("MultiEnumColumn")))
+		if (IsColumnType(ColumnType, TEXT("MultiEnumColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -760,7 +796,49 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("EnumColumn")))
+		if (IsColumnType(ColumnType, TEXT("BoolColumn")))
+		{
+			FString Comparison;
+			if (const TSharedPtr<FJsonValue> ValueNode = ParseJsonValue(ValueJson))
+			{
+				if (ValueNode->Type == EJson::String)
+				{
+					Comparison = ValueNode->AsString();
+				}
+				else if (ValueNode->Type == EJson::Number)
+				{
+					double NumericValue = 0.0;
+					ValueNode->TryGetNumber(NumericValue);
+					const int32 EnumValue = static_cast<int32>(NumericValue);
+					Comparison = EnumValue == 0 ? TEXT("MatchFalse") : EnumValue == 1 ? TEXT("MatchTrue") : TEXT("MatchAny");
+				}
+				else if (const TSharedPtr<FJsonObject> ValueObject = ValueNode->AsObject())
+				{
+					if (!ValueObject->TryGetStringField(TEXT("value"), Comparison))
+					{
+						ValueObject->TryGetStringField(TEXT("comparison"), Comparison);
+					}
+				}
+			}
+
+			if (Comparison == TEXT("MatchTrue"))
+			{
+				Result.Text = FString::Printf(TEXT("%s == true"), *Label);
+				Result.bConstrains = true;
+			}
+			else if (Comparison == TEXT("MatchFalse"))
+			{
+				Result.Text = FString::Printf(TEXT("%s == false"), *Label);
+				Result.bConstrains = true;
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
+			}
+			return Result;
+		}
+
+		if (IsColumnType(ColumnType, TEXT("EnumColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -801,32 +879,7 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("BoolColumn")))
-		{
-			FString Comparison;
-			if (const TSharedPtr<FJsonValue> ValueNode = ParseJsonValue(ValueJson))
-			{
-				Comparison = ValueNode->AsString();
-			}
-
-			if (Comparison == TEXT("MatchTrue"))
-			{
-				Result.Text = FString::Printf(TEXT("%s == 真"), *Label);
-				Result.bConstrains = true;
-			}
-			else if (Comparison == TEXT("MatchFalse"))
-			{
-				Result.Text = FString::Printf(TEXT("%s == 假"), *Label);
-				Result.bConstrains = true;
-			}
-			else
-			{
-				Result.Text = FString::Printf(TEXT("%s: 任意"), *Label);
-			}
-			return Result;
-		}
-
-		if (ColumnType.EndsWith(TEXT("FloatRangeColumn")))
+		if (IsColumnType(ColumnType, TEXT("FloatRangeColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -861,6 +914,11 @@ namespace
 				Result.Text = FString::Printf(TEXT("%s >= %s"), *Label, *MinText);
 				Result.bConstrains = true;
 			}
+			else if (MinValue == MaxValue)
+			{
+				Result.Text = FString::Printf(TEXT("%s == %s"), *Label, *MinText);
+				Result.bConstrains = true;
+			}
 			else
 			{
 				Result.Text = FString::Printf(TEXT("%s <= %s <= %s"), *MinText, *Label, *MaxText);
@@ -869,7 +927,7 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("FloatDistanceColumn")))
+		if (IsColumnType(ColumnType, TEXT("FloatDistanceColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -881,12 +939,25 @@ namespace
 
 			double Value = 0.0;
 			ValueObject->TryGetNumberField(TEXT("value"), Value);
-			Result.Text = FString::Printf(TEXT("%s ≈ %s（按距离评分）"), *Label, *FString::SanitizeFloat(Value));
+			const FString ValueText = FString::SanitizeFloat(Value);
+
+			// FloatDistanceColumn 默认是评分列：不删行，|输入 - 目标| 越小成本越低、越优先（最近者胜）。
+			// 仅当 bFilterOverMaxDistance=true 时，才额外按 |输入 - 目标| < MaxDistance 做硬过滤。
+			const bool bHardFilter = ReadColumnBool(ColumnStruct, TEXT("bFilterOverMaxDistance"), false);
+			if (bHardFilter)
+			{
+				const double MaxDistance = ReadColumnDouble(ColumnStruct, TEXT("MaxDistance"), 0.0);
+				Result.Text = FString::Printf(TEXT("|%s - %s| < %s（接近者优先）"), *Label, *ValueText, *FString::SanitizeFloat(MaxDistance));
+			}
+			else
+			{
+				Result.Text = FString::Printf(TEXT("%s 接近 %s 者优先（评分，不过滤）"), *Label, *ValueText);
+			}
 			Result.bConstrains = true;
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("GameplayTagQueryColumn")))
+		if (IsColumnType(ColumnType, TEXT("GameplayTagQueryColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			const FString Description = DescribeGameplayTagQuery(ValueObject);
@@ -897,7 +968,7 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("GameplayTagColumn")))
+		if (IsColumnType(ColumnType, TEXT("GameplayTagColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -938,7 +1009,7 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("ObjectClassColumn")))
+		if (IsColumnType(ColumnType, TEXT("ObjectClassColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -978,7 +1049,7 @@ namespace
 			return Result;
 		}
 
-		if (ColumnType.EndsWith(TEXT("ObjectColumn")))
+		if (IsColumnType(ColumnType, TEXT("ObjectColumn")))
 		{
 			const TSharedPtr<FJsonObject> ValueObject = ParseJsonObject(ValueJson);
 			if (!ValueObject.IsValid())
@@ -1046,6 +1117,7 @@ namespace
 				ConstraintTexts.Add(CellCondition.Text);
 			}
 		}
+		Info.ConditionTerms = ConstraintTexts;
 		Info.ConditionSummary = ConstraintTexts.Num() > 0
 			? FString::Join(ConstraintTexts, TEXT(" 且 "))
 			: TEXT("（无筛选条件，命中任意输入）");
@@ -1498,6 +1570,29 @@ FChooserToolsetNestedChooserOutline UChooserToolset::DescribeNestedChooserOutlin
 		}
 	}
 
+	// 预计算每个节点的"祖先继承前提"：沿 ParentIndex 链累加各级父行(SourceRowIndex)的条件项。
+	// 父节点 index 必小于子节点（先 append 父再递归子），故顺序遍历即可复用父结果。
+	// 经由 fallback 到达的节点 SourceRowIndex 为 INDEX_NONE，该跳不贡献条件，但仍继承更上层前提。
+	TArray<TArray<FString>> NodePathTerms;
+	NodePathTerms.SetNum(NestedChoosers.Nodes.Num());
+	for (int32 NodeIdx = 0; NodeIdx < NestedChoosers.Nodes.Num(); ++NodeIdx)
+	{
+		const FChooserToolsetNestedChooserNode& Node = NestedChoosers.Nodes[NodeIdx];
+		if (Node.ParentIndex == INDEX_NONE || !NestedChoosers.Nodes.IsValidIndex(Node.ParentIndex))
+		{
+			continue;
+		}
+		NodePathTerms[NodeIdx] = NodePathTerms[Node.ParentIndex];
+		const FChooserToolsetNestedChooserNode& Parent = NestedChoosers.Nodes[Node.ParentIndex];
+		if (Parent.Description.Rows.IsValidIndex(Node.SourceRowIndex))
+		{
+			for (const FString& Term : Parent.Description.Rows[Node.SourceRowIndex].ConditionTerms)
+			{
+				NodePathTerms[NodeIdx].AddUnique(Term);
+			}
+		}
+	}
+
 	for (const FChooserToolsetNestedChooserNode& Node : NestedChoosers.Nodes)
 	{
 		FChooserToolsetOutlineNode& OutlineNode = Outline.Nodes.AddDefaulted_GetRef();
@@ -1510,12 +1605,22 @@ FChooserToolsetNestedChooserOutline UChooserToolset::DescribeNestedChooserOutlin
 		OutlineNode.bCycle = Node.bCycle;
 		OutlineNode.ChildIndices = Node.ChildIndices;
 
+		// 祖先链已保证的前提（预计算）：本节点求值时必然成立，从行级条件中消除，避免重复展示配置冗余。
+		const TArray<FString>& InheritedTerms = NodePathTerms[Node.Index];
+		OutlineNode.InheritedCondition = InheritedTerms.Num() > 0 ? FString::Join(InheritedTerms, TEXT(" 且 ")) : FString();
+
 		for (const FChooserToolsetRowInfo& Row : Node.Description.Rows)
 		{
 			FChooserToolsetOutlineRow& OutlineRow = OutlineNode.Rows.AddDefaulted_GetRef();
 			OutlineRow.Index = Row.Index;
 			OutlineRow.bDisabled = Row.bDisabled;
-			OutlineRow.Condition = CompactConditionSummary(Row.ConditionSummary);
+
+			TArray<FString> RowTerms = Row.ConditionTerms;
+			RowTerms.RemoveAll([&InheritedTerms](const FString& Term)
+			{
+				return InheritedTerms.Contains(Term);
+			});
+			OutlineRow.Condition = RowTerms.Num() > 0 ? FString::Join(RowTerms, TEXT(" 且 ")) : TEXT("任意");
 
 			if (!Row.NestedChooserPath.IsEmpty())
 			{

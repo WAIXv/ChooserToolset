@@ -133,6 +133,10 @@ struct FChooserToolsetRowInfo
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	FString ConditionSummary;
+
+	/// 本行各筛选列翻译出的单项约束（未 join）。供上层区分"全表恒定前置"与"行级判别项"。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<FString> ConditionTerms;
 };
 
 /// Complete description of a Chooser table or nested chooser.
@@ -285,6 +289,11 @@ struct FChooserToolsetOutlineNode
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	bool bCycle = false;
+
+	/// 沿祖先链（各级 SourceRowIndex 父行条件）已经保证的前提：本节点求值时必然成立。
+	/// 这些项已从行级 Condition 中消除，避免重复展示 Chooser 配置中"子表复查祖先已筛条件"的冗余。
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString InheritedCondition;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	TArray<int32> ChildIndices;
