@@ -234,6 +234,84 @@ struct FChooserToolsetNestedChooserDescription
 	TArray<FString> Errors;
 };
 
+/// 面向 LLM 的最小行条件和目标信息。
+USTRUCT(BlueprintType)
+struct FChooserToolsetOutlineRow
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 Index = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	bool bDisabled = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString Condition;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString TargetKind;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString Target;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 TargetNodeIndex = INDEX_NONE;
+};
+
+/// 面向 LLM 的最小 NestedChooser 节点。
+USTRUCT(BlueprintType)
+struct FChooserToolsetOutlineNode
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 Index = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 ParentIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 Depth = 0;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	int32 SourceRowIndex = INDEX_NONE;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString Name;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString ChooserPath;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	bool bCycle = false;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<int32> ChildIndices;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<FChooserToolsetOutlineRow> Rows;
+};
+
+/// 面向 Agent/LLM 的精简 NestedChooser 层级概要。
+USTRUCT(BlueprintType)
+struct FChooserToolsetNestedChooserOutline
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString AssetPath;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	FString NestedChooserName;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<FChooserToolsetOutlineNode> Nodes;
+
+	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
+	TArray<FString> Errors;
+};
+
 /// Compact row information for large chooser tables.
 USTRUCT(BlueprintType)
 struct FChooserToolsetRowSummary
@@ -509,6 +587,15 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "Chooser")
 	static FChooserToolsetNestedChooserDescription DescribeNestedChoosers(const FString& AssetPath, const FString& NestedChooserName);
+
+	/**
+	 * 返回适合 LLM 消费的精简 Chooser 层级概要。
+	 * 保留节点拓扑、每行条件摘要和行目标，省略原始 column/cell/result JSON。
+	 * @param AssetPath root UChooserTable 资产路径。
+	 * @param NestedChooserName 可选 nested chooser 子对象名；空字符串表示 root。
+	 */
+	UFUNCTION(BlueprintCallable, meta = (AICallable), Category = "Chooser")
+	static FChooserToolsetNestedChooserOutline DescribeNestedChooserOutline(const FString& AssetPath, const FString& NestedChooserName);
 
 	/**
 	 * Returns a compact Chooser description without serializing every cell and result struct.

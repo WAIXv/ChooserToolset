@@ -69,7 +69,7 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 | `nestedChooserNames` | root chooser 上登记的 nested chooser 名称。 |
 | `context[]` | context 声明，包含 wrapper type 和 raw JSON。 |
 | `columns[]` | column 类型、输入类型、binding、row values。 |
-| `rows[]` | row 禁用状态、cells、result、引用对象和 nested target。 |
+| `rows[]` | row 禁用状态、condition summary、result、引用对象和 nested target。 |
 | `fallback*` | fallback result、引用对象和 nested target。 |
 
 ### Context
@@ -91,21 +91,11 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 | `allowedClass` | object binding 允许的 class。 |
 | `bindingJson` | 原始 binding JSON，主要用于排障。 |
 
-### Row Cells
+### Row Conditions
 
-`rows[].cells[]` 已经按行把 column row values 聚合好，使用者不需要再手动 join `columns[].rowValuesJson[rowIndex]`。
+`rows[].conditionSummary` 已经由 C++ 按行把筛选 column 的 row values 翻译成可读条件。使用者不需要再手动 join `columns[].rowValuesJson[rowIndex]`，也不要在 Python 层重复解释 cell JSON。
 
-| 字段 | 含义 |
-|---|---|
-| `columnIndex` | 来源 column 下标。 |
-| `columnType` | 来源 column struct 类型。 |
-| `inputType` | column 输入 binding 类型。 |
-| `bindingDisplayName` | 来源 binding 显示名。 |
-| `bindingPropertyPath[]` | 来源 binding 属性链。 |
-| `valueJson` | 当前 row 在该 column 下的 cell 值。 |
-| `conditionText` | 可读筛选条件；输出列或非筛选列可为空。 |
-
-`rows[].conditionSummary` 会把有效筛选条件拼成一句话，适合报告和人工 review。
+`conditionSummary` 会把有效筛选条件拼成一句话；没有筛选条件时返回 `（无筛选条件，命中任意输入）`。LLM outline 接口会把这句进一步压缩为 `任意`。
 
 ### Result 与 NestedChooser
 
@@ -145,6 +135,46 @@ UnrealEditor-Cmd.exe Project.uproject -EnablePlugins=AllToolsets -run=pythonscri
 | `description` | 当前 chooser 的完整 `DescribeChooser` 结果。 |
 
 外部导出层可以根据 `parentIndex` / `sourceRowIndex` / `sourceResultType` 生成 `edges[]`，但不应改变 node 内事实字段。
+
+## LLM 层级概要
+
+`DescribeNestedChooserOutline` 返回 `FChooserToolsetNestedChooserOutline`，是最终交给 Agent/LLM 的推荐入口。它复用 `DescribeNestedChoosers` 的 C++ 解析结果，只保留层级、每行条件和输出目标，避免把原始 column/cell/result JSON 暴露给 LLM。
+
+顶层字段：
+
+| 字段 | 含义 |
+|---|---|
+| `assetPath` | root Chooser 资产路径。 |
+| `nestedChooserName` | 请求的起始 nested chooser；root 为空。 |
+| `nodes[]` | root 和所有可达 nested chooser 的精简节点。 |
+| `errors[]` | 加载、解析、递归错误。 |
+
+每个 node 包含：
+
+| 字段 | 含义 |
+|---|---|
+| `index` | 当前 node 下标。 |
+| `parentIndex` | 父 node 下标；root 为 `-1`。 |
+| `depth` | 递归深度。 |
+| `sourceRowIndex` | 父 chooser 中触发该 nested chooser 的 row index；root 为 `-1`。 |
+| `name` | 压缩后的 Chooser 名称，便于 LLM 阅读。 |
+| `chooserPath` | 当前 chooser 的完整路径。 |
+| `cycle` | 是否检测到递归环。 |
+| `childIndices[]` | 子 node 下标。 |
+| `rows[]` | 当前 chooser 的行条件和目标。 |
+
+每个 row 包含：
+
+| 字段 | 含义 |
+|---|---|
+| `index` | 行号，保留 Chooser 选择顺序。 |
+| `disabled` | 行是否禁用。 |
+| `condition` | C++ 已翻译的行筛选条件；无筛选条件压缩为 `任意`。 |
+| `targetKind` | `NestedChooser`、`Object` 或 `None`。 |
+| `target` | 压缩后的目标名。 |
+| `targetNodeIndex` | `targetKind=NestedChooser` 时对应的 node 下标，否则为 `-1`。 |
+
+Python/Commandlet 可以把这个结构直接写成 UTF-8 JSON，或按 `parentIndex` / `childIndices` 排版成 Markdown 树；不要在 Python 里重新解释 `rowValuesJson`、`resultJson` 或 Chooser 内部 struct。
 
 ## ProxyTable 描述结构
 
@@ -186,7 +216,7 @@ Entry 包含 `proxyAsset`、`guid`、`legacyKey`、`valueType`、`referencedObje
 - `summary`
 - `edges[]`
 
-用于 diff 的归一化程序建议忽略 `generatedAt`，对对象 key 做稳定排序，并优先比较结构化字段：`context`、`columns.binding`、`rows.cells`、`rows.resultType`、`rows.referencedObject`、`rows.nestedChooserPath`、`fallback`、`nodes` 和 `errors`。
+用于 diff 的归一化程序建议忽略 `generatedAt`，对对象 key 做稳定排序，并优先比较结构化字段：`context`、`columns.binding`、`rows.conditionSummary`、`rows.resultType`、`rows.referencedObject`、`rows.nestedChooserPath`、`fallback`、`nodes` 和 `errors`。
 
 ## 反模式
 

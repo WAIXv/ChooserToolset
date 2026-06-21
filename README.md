@@ -11,18 +11,17 @@ Chooser 和 ProxyTable 通常承载“强逻辑配置”：行顺序、筛选条
 `ChooserToolset` 的目标是提供一个 C++ 层的权威解析入口：
 
 - 直接读取 `UChooserTable` / `UProxyTable` 的真实数据结构。
-- 输出 column binding、row cells、result、fallback、NestedChooser graph 等语义字段。
+- 输出 column binding、row condition summary、result、fallback、NestedChooser graph 等语义字段。
 - 让 Python、Commandlet、CI 或 Agent 只负责调用和落盘，不再自己写 parser。
 - 为确定性 JSON diff、风险审计、历史快照对比提供稳定输入。
 
 ## 功能概览
 
-- **Chooser 列表与描述**：列出项目中的 ChooserTable，描述 context、columns、rows、cells、results 和 fallback。
+- **Chooser 列表与描述**：列出项目中的 ChooserTable，描述 context、columns、rows、results 和 fallback。
 - **NestedChooser 递归展开**：从 root chooser 出发，把所有可达 `NestedChooser` 展成扁平 graph，保留 parent/source row/source result 信息。
 - **ProxyTable 描述**：读取 ProxyTable editor/runtime entries、继承表、重复 GUID、ProxyAsset 映射和引用对象。
 - **结构化 binding**：提取 `InputValue.Binding` 的 context index、property path、display name、enum/struct/class 类型。
-- **行级 cells**：把每行 cell 和来源 column/binding 聚合好，调用方无需再手动 join `columns[].rowValues[rowIndex]`。
-- **可读条件摘要**：提供 `conditionText` / `conditionSummary`，方便报告和人工 review。
+- **可读条件摘要**：把每行筛选 cell 翻译成 `conditionSummary`，调用方无需再手动 join `columns[].rowValues[rowIndex]`。
 - **只读校验与测试求值**：支持 compile/data validation 和 JSON context 的 test evaluate。
 - **受控编辑 API**：提供创建 Chooser、增删行列、设置 cell/result/fallback 等 API；默认审计流程应只使用只读 API。
 
@@ -116,6 +115,7 @@ with open(out_path, "w", encoding="utf-8") as handle:
 | `list_choosers(output_object_type)` | 列出项目中的 ChooserTable。 |
 | `describe_chooser(asset_path, nested_chooser_name)` | 描述 root 或指定 nested chooser。 |
 | `describe_nested_choosers(asset_path, nested_chooser_name)` | 递归展开所有可达 `NestedChooser`。 |
+| `describe_nested_chooser_outline(asset_path, nested_chooser_name)` | 面向 LLM 的精简层级概要，只保留节点拓扑、每行条件和目标。 |
 | `describe_chooser_summary(asset_path, nested_chooser_name, max_rows, max_cell_samples)` | 大表摘要，避免导出全部 cell/result。 |
 | `compile_chooser(asset_path, nested_chooser_name)` | 编译并执行数据校验。 |
 | `test_evaluate(asset_path, nested_chooser_name, context_json)` | 使用 JSON context 测试求值。 |
@@ -139,8 +139,7 @@ with open(out_path, "w", encoding="utf-8") as handle:
 - `context`：Chooser context 声明和 raw JSON。
 - `columns`：列类型、输入类型、row values、binding。
 - `columns[].binding`：`contextIndex`、`displayName`、`propertyPath`、`enumType`、`structType`、`allowedClass` 等。
-- `rows`：行禁用状态、cells、result、引用对象、NestedChooser 路径。
-- `rows[].cells`：已按行聚合的 cell，包含来源 column 和 binding 信息。
+- `rows`：行禁用状态、result、引用对象、NestedChooser 路径和条件摘要。
 - `rows[].conditionSummary`：本行可读条件摘要。
 - `fallback`：fallback result、引用对象和 NestedChooser 路径。
 
@@ -154,6 +153,15 @@ with open(out_path, "w", encoding="utf-8") as handle:
 - `nodes[].cycle`：是否检测到递归环。
 - `errors[]`：加载或解析错误。
 
+`describe_nested_chooser_outline(...)` 是最终交给 LLM 的推荐入口：
+
+- `nodes[]`：扁平层级节点，可用 `parentIndex` / `childIndices` 还原树。
+- `nodes[].name` / `chooserPath`：节点名称和原始 Chooser 路径。
+- `nodes[].rows[]`：按 Chooser 行顺序列出 `condition`、`targetKind`、`target`。
+- `rows[].targetNodeIndex`：当目标是 NestedChooser 时指向对应 node；普通对象输出为 `-1`。
+
+这个接口不会输出 `columns`、`rowValuesJson`、`resultJson` 等原始解析字段。C++ 层负责识别筛选列、翻译行条件、解析 nested/object target；Python/Commandlet 只负责调用、写 UTF-8 JSON 和补充外层 metadata。
+
 更完整的字段说明见 [`Docs/ChooserToolsetUsage.md`](Docs/ChooserToolsetUsage.md)。
 
 ## 推荐集成方式
@@ -163,7 +171,7 @@ with open(out_path, "w", encoding="utf-8") as handle:
 推荐把 `ChooserToolset` 包装在项目自己的 Commandlet 或固定脚本里：
 
 1. 扫描目标资产。
-2. 调用 `describe_nested_choosers` / `describe_proxy_table`。
+2. 调用 `describe_nested_chooser_outline` / `describe_nested_choosers` / `describe_proxy_table`。
 3. 写 UTF-8 JSON。
 4. 对 JSON 做确定性归一化和 diff。
 5. 把 diff 交给规则引擎、CI 或 Agent 分析。
@@ -174,7 +182,8 @@ Commandlet 可以负责批量调度、manifest、文件 IO、schema version、su
 
 Agent 应只消费 `ChooserToolset` 的结构化输出：
 
-- 优先读 `binding`、`cells`、`referencedObject`、`nestedChooserPath`、`sourceResultType`。
+- LLM 场景优先读 `describe_nested_chooser_outline`。
+- 调试场景优先读 `binding`、`conditionSummary`、`referencedObject`、`nestedChooserPath`、`sourceResultType`。
 - 不要从 `resultJson` 字符串里猜 nested target。
 - 不要把 context wrapper type 当成业务输入类型。
 - 不要在分析阶段临时启动 UE 补数据。

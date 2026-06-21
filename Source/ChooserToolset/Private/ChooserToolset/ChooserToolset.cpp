@@ -34,6 +34,7 @@ namespace
 	FString PropertyValueToJson(FProperty* Property, const void* Value);
 	FString StructMemoryToJson(const UScriptStruct* StructType, const void* StructMemory);
 	FString GetReferencedObjectPath(const FInstancedStruct& Struct);
+	FString NormalizeChooserReference(FString ChooserReference);
 	bool TryExtractNestedChooserPathFromJson(const FString& ResultJson, FString& OutChooserPath);
 
 	void RaiseChooserToolsetError(const FString& Message)
@@ -574,6 +575,39 @@ namespace
 			return Value.RightChop(SeparatorIndex + 1);
 		}
 		return Value;
+	}
+
+	FString CompactChooserName(FString ChooserPath)
+	{
+		ChooserPath = NormalizeChooserReference(ChooserPath);
+		int32 SeparatorIndex = INDEX_NONE;
+		int32 CandidateIndex = INDEX_NONE;
+		if (ChooserPath.FindLastChar(TEXT(':'), CandidateIndex))
+		{
+			SeparatorIndex = FMath::Max(SeparatorIndex, CandidateIndex);
+		}
+		if (ChooserPath.FindLastChar(TEXT('.'), CandidateIndex))
+		{
+			SeparatorIndex = FMath::Max(SeparatorIndex, CandidateIndex);
+		}
+		if (ChooserPath.FindLastChar(TEXT('/'), CandidateIndex))
+		{
+			SeparatorIndex = FMath::Max(SeparatorIndex, CandidateIndex);
+		}
+		if (SeparatorIndex != INDEX_NONE)
+		{
+			return ChooserPath.RightChop(SeparatorIndex + 1);
+		}
+		return ChooserPath;
+	}
+
+	FString CompactConditionSummary(const FString& ConditionSummary)
+	{
+		if (ConditionSummary == TEXT("（无筛选条件，命中任意输入）"))
+		{
+			return TEXT("任意");
+		}
+		return ConditionSummary;
 	}
 
 	bool ReadColumnBool(const FInstancedStruct& ColumnStruct, FName PropertyName, bool DefaultValue)
@@ -1428,6 +1462,89 @@ FChooserToolsetNestedChooserDescription UChooserToolset::DescribeNestedChoosers(
 	TSet<FString> ActivePath;
 	AppendNestedChooserNode(NestedChoosers, RootPath, StartPath, INDEX_NONE, 0, INDEX_NONE, TEXT("Root"), FString(), ActivePath);
 	return NestedChoosers;
+}
+
+FChooserToolsetNestedChooserOutline UChooserToolset::DescribeNestedChooserOutline(const FString& AssetPath, const FString& NestedChooserName)
+{
+	FChooserToolsetNestedChooserOutline Outline;
+	Outline.AssetPath = AssetPath;
+	Outline.NestedChooserName = NestedChooserName;
+
+	const FChooserToolsetNestedChooserDescription NestedChoosers = DescribeNestedChoosers(AssetPath, NestedChooserName);
+	Outline.Errors = NestedChoosers.Errors;
+
+	TMap<FString, int32> ChildNodeByRowTarget;
+	for (const FChooserToolsetNestedChooserNode& Node : NestedChoosers.Nodes)
+	{
+		for (const int32 ChildIndex : Node.ChildIndices)
+		{
+			if (!NestedChoosers.Nodes.IsValidIndex(ChildIndex))
+			{
+				continue;
+			}
+
+			const FChooserToolsetNestedChooserNode& ChildNode = NestedChoosers.Nodes[ChildIndex];
+			if (ChildNode.SourceKind != TEXT("RowResult"))
+			{
+				continue;
+			}
+
+			const FString ChildKey = FString::Printf(
+				TEXT("%d|%d|%s"),
+				Node.Index,
+				ChildNode.SourceRowIndex,
+				*NormalizeChooserReference(ChildNode.ChooserPath));
+			ChildNodeByRowTarget.Add(ChildKey, ChildNode.Index);
+		}
+	}
+
+	for (const FChooserToolsetNestedChooserNode& Node : NestedChoosers.Nodes)
+	{
+		FChooserToolsetOutlineNode& OutlineNode = Outline.Nodes.AddDefaulted_GetRef();
+		OutlineNode.Index = Node.Index;
+		OutlineNode.ParentIndex = Node.ParentIndex;
+		OutlineNode.Depth = Node.Depth;
+		OutlineNode.SourceRowIndex = Node.SourceRowIndex;
+		OutlineNode.Name = CompactChooserName(Node.Description.NestedChooserName.IsEmpty() ? Node.ChooserPath : Node.Description.NestedChooserName);
+		OutlineNode.ChooserPath = Node.ChooserPath;
+		OutlineNode.bCycle = Node.bCycle;
+		OutlineNode.ChildIndices = Node.ChildIndices;
+
+		for (const FChooserToolsetRowInfo& Row : Node.Description.Rows)
+		{
+			FChooserToolsetOutlineRow& OutlineRow = OutlineNode.Rows.AddDefaulted_GetRef();
+			OutlineRow.Index = Row.Index;
+			OutlineRow.bDisabled = Row.bDisabled;
+			OutlineRow.Condition = CompactConditionSummary(Row.ConditionSummary);
+
+			if (!Row.NestedChooserPath.IsEmpty())
+			{
+				OutlineRow.TargetKind = TEXT("NestedChooser");
+				OutlineRow.Target = CompactChooserName(Row.NestedChooserPath);
+
+				const FString ChildKey = FString::Printf(
+					TEXT("%d|%d|%s"),
+					Node.Index,
+					Row.Index,
+					*NormalizeChooserReference(Row.NestedChooserPath));
+				if (const int32* TargetNodeIndex = ChildNodeByRowTarget.Find(ChildKey))
+				{
+					OutlineRow.TargetNodeIndex = *TargetNodeIndex;
+				}
+			}
+			else if (!Row.ReferencedObject.IsEmpty())
+			{
+				OutlineRow.TargetKind = TEXT("Object");
+				OutlineRow.Target = CompactName(Row.ReferencedObject);
+			}
+			else
+			{
+				OutlineRow.TargetKind = TEXT("None");
+			}
+		}
+	}
+
+	return Outline;
 }
 
 FChooserToolsetSummary UChooserToolset::DescribeChooserSummary(const FString& AssetPath, const FString& NestedChooserName, int32 MaxRows, int32 MaxCellSamples)
