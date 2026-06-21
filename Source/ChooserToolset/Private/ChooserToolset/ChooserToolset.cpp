@@ -501,7 +501,6 @@ namespace
 
 		Info.bDisabled = Column->bDisabled;
 		Info.InputType = Column->GetInputType() ? Column->GetInputType()->GetPathName() : FString();
-		Info.InputValueType = Info.InputType;
 		Info.InputValueJson = GetInputValueJson(Column);
 		Info.Binding = DescribeInputBinding(Column);
 		Info.RowValuesProperty = Column->RowValuesPropertyName().ToString();
@@ -679,36 +678,23 @@ namespace
 		Info.Index = RowIndex;
 		Info.bDisabled = Chooser->DisabledRows.IsValidIndex(RowIndex) && Chooser->DisabledRows[RowIndex];
 
-		// @KUROGAMES BEGIN 行筛选条件可读化：收集本行各筛选列的有效条件，拼成行级 ConditionSummary
+		// 遍历各列，把本行每个筛选 cell 翻成可读条件，收集有效约束拼成行级 ConditionSummary。
+		// 不再单独输出 cell 列表：每个 cell 的原始值已按列存于 Columns[].RowValuesJson，按行再存一遍属于冗余。
 		TArray<FString> ConstraintTexts;
-		// @KUROGAMES END
 		for (const FChooserToolsetColumnInfo& Column : Columns)
 		{
-			FChooserToolsetCellInfo Cell;
-			Cell.ColumnIndex = Column.Index;
-			Cell.ColumnType = Column.Type;
-			Cell.InputType = Column.InputType;
-			Cell.BindingDisplayName = Column.Binding.DisplayName;
-			Cell.BindingPropertyPath = Column.Binding.PropertyPath;
-			if (Column.RowValuesJson.IsValidIndex(RowIndex))
-			{
-				Cell.ValueJson = Column.RowValuesJson[RowIndex];
-			}
-			// @KUROGAMES BEGIN 行筛选条件可读化：把该 cell 翻译成可读条件，并收集有效约束用于行汇总
-			const FCellConditionResult CellCondition = BuildCellCondition(Cell.ColumnType, Cell.BindingDisplayName, Cell.ValueJson);
-			Cell.ConditionText = CellCondition.Text;
+			const FString CellValueJson = Column.RowValuesJson.IsValidIndex(RowIndex)
+				? Column.RowValuesJson[RowIndex]
+				: FString();
+			const FCellConditionResult CellCondition = BuildCellCondition(Column.Type, Column.Binding.DisplayName, CellValueJson);
 			if (CellCondition.bConstrains)
 			{
 				ConstraintTexts.Add(CellCondition.Text);
 			}
-			// @KUROGAMES END
-			Info.Cells.Add(MoveTemp(Cell));
 		}
-		// @KUROGAMES BEGIN 行筛选条件可读化：拼出行级汇总；本行无任何有效约束时给出占位说明
 		Info.ConditionSummary = ConstraintTexts.Num() > 0
 			? FString::Join(ConstraintTexts, TEXT(" 且 "))
 			: TEXT("（无筛选条件，命中任意输入）");
-		// @KUROGAMES END
 
 		if (Chooser->ResultsStructs.IsValidIndex(RowIndex))
 		{

@@ -98,9 +98,6 @@ struct FChooserToolsetColumnInfo
 	FString RowValuesProperty;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString InputValueType;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	FString InputValueJson;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
@@ -108,36 +105,6 @@ struct FChooserToolsetColumnInfo
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	TArray<FString> RowValuesJson;
-};
-
-/// One row cell joined with its source column metadata.
-USTRUCT(BlueprintType)
-struct FChooserToolsetCellInfo
-{
-	GENERATED_BODY()
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	int32 ColumnIndex = INDEX_NONE;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString ColumnType;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString InputType;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString BindingDisplayName;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	TArray<FString> BindingPropertyPath;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString ValueJson;
-
-	// @KUROGAMES BEGIN 行筛选条件可读化：该 cell 翻译后的可读筛选条件（如 "在地面 == 真"）；输出列等非筛选列为空
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	FString ConditionText;
-	// @KUROGAMES END
 };
 
 /// A reflected Chooser row result.
@@ -151,9 +118,6 @@ struct FChooserToolsetRowInfo
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	bool bDisabled = false;
-
-	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
-	TArray<FChooserToolsetCellInfo> Cells;
 
 	UPROPERTY(BlueprintReadWrite, Category = "Chooser")
 	FString ResultType;
